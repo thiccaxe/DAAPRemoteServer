@@ -23,15 +23,19 @@ import random
 from textwrap import wrap
 
 # update these
-SERVER_NAME = "UxPlay"
-ADDRESS = "192.168.1.25"
+SERVER_NAME = "NotUxPlay"
+ADDRESS = "192.168.1.35"
 SERVER_ADDRESSES = [inet_aton(ADDRESS),]
 SERVER_PORT = 33689
-ARROWS_PORT = 35001
+ARROWS_PORT = 34999
 
-SUB_TEXT = 846957779 # used as an encryption key. // todo: set this per-session
-DAAP_DATABASE_ID = "A1D38C11E088FB22B"
-DAAP_SERVER_ID = "A1E38C11E07FB22C"
+UXPLAY_CLIENT_ACTIVE_REMOTE = "0123456789"
+UXPLAY_CLIENT_DACP_ID = "DACP_ID"
+UXPLAY_CLIENT_IP_ADDR = "192.168...." # not needed i guess?
+
+SUB_TEXT = 1471545639  # int.from_bytes(random.randbytes(4)) # used as an encryption key. // todo: set this per-session??? or should be constant?
+DAAP_DATABASE_ID = "DDEA93B661D72B89" # binascii.hexlify(random.randbytes(8)).decode("utf-8").upper() gen these once?
+DAAP_SERVER_ID = "793C37358B18AEF8"   #        ^ ^ ^
 
 
 @dataclass
@@ -42,12 +46,20 @@ class ClientRemotePairingRecord:
     addresses: list[str]
     name: str
 
+@dataclass
+class ClientRemoteControlRecord:
+    fqn: str
+    port: int
+    addresses: list[str]
+    name: str
+
 class AsyncRunner:
     def __init__(self, app) -> None:
         self.aiobrowser: Optional[AsyncServiceBrowser] = None
         self.aiozc: Optional[AsyncZeroconf] = None
         self.app: web.Application = app
-        self.app[mdns_entries] = {}
+        self.app[remote_pairing_mdns_entries] = {}
+        self.app[remote_control_mdns_entries] = {}
 
     async def async_run(self) -> None:
         self.aiozc = AsyncZeroconf(ip_version=IPVersion.All)
@@ -69,10 +81,10 @@ class AsyncRunner:
             server=f"{SERVER_NAME}.local."
         )
 
-        services = ["_touch-remote._tcp.local."]
+        self.services = ["_touch-remote._tcp.local.", "_dacp._tcp.local."]
 
         self.aiobrowser = AsyncServiceBrowser(
-            self.aiozc.zeroconf, services, handlers=[self.async_on_service_state_change]
+            self.aiozc.zeroconf, self.services, handlers=[self.async_on_service_state_change]
         )
         await self.aiozc.async_register_service(self.service_info)
         while True:
@@ -88,16 +100,22 @@ class AsyncRunner:
         await self.aiobrowser.async_cancel()
         await self.aiozc.async_close()
 
-    def delete_entry(self, name):
-        if name in self.app[mdns_entries]:
-            del self.app[mdns_entries][name]
+    def delete_entry(self, name, service_type):
+        if service_type == "_touch-remote._tcp.local.":
+            if name in self.app[remote_pairing_mdns_entries]:
+                del self.app[remote_pairing_mdns_entries][name]
+        elif service_type == "_dacp._tcp.local.":
+            if name in self.app[remote_control_mdns_entries]:
+                del self.app[remote_control_mdns_entries][name]
 
     def async_on_service_state_change(self,
         zeroconf: Zeroconf, service_type: str, name: str, state_change: ServiceStateChange
     ) -> None:
         print(f"Service {name} of type {service_type} state changed: {state_change}")
+        if service_type not in self.services: # guard
+            return
         if state_change == ServiceStateChange.Removed:
-            self.delete_entry(name)    
+            self.delete_entry(name, service_type)    
         else:
             asyncio.ensure_future(self.async_display_service_info(zeroconf, service_type, name, state_change))
 
@@ -106,34 +124,41 @@ class AsyncRunner:
         info = AsyncServiceInfo(service_type, name)
         await info.async_request(zeroconf, 3000)
         print("Info from zeroconf.get_service_info: %r" % (info))
-        if info:
-            addresses = [(addr, cast(int, info.port)) for addr in info.parsed_scoped_addresses()]
-            
-            print("  Name: %s" % name)
-            # print("  Addresses: %s" % ", ".join(addresses))
+        if not info:
+            print("  No info")
+            return
+        addresses = [(addr, cast(int, info.port)) for addr in info.parsed_scoped_addresses()]
+        
+        print("  Name: %s" % name)
+        # print("  Addresses: %s" % ", ".join(addresses))
 
-            print(f"  Server: {info.server}")
-            if info.properties:
-                print("  Properties are:")
-                for key, value in info.properties.items():
-                    print(f"    {key!r}: {value!r}")
-            else:
-                print("  No properties")
-            
-            if not info.properties:
-                print("No properties, bad record")
-                self.delete_entry(name)
-                return
+        print(f"  Server: {info.server}")
+        if info.properties:
+            print("  Properties are:")
+            for key, value in info.properties.items():
+                print(f"    {key!r}: {value!r}")
+        else:
+            print("  No properties")
+        
+        if not info.properties:
+            print("No properties, bad record")
+            self.delete_entry(name, service_type)
+            return
+        if service_type == "_touch-remote._tcp.local.":
             if b'Pair' not in info.properties:
                 print("No Pair key in properites, bad record")
-                self.delete_entry(name)
+                self.delete_entry(name, service_type)
                 return
             pairing_guid = info.properties[b'Pair'].decode("utf-8")
-            pretty_name = info.properties[b'DvNm'].decode("utf-8") if b'DvNm' in info.properties else name.split["."][0]
+            pretty_name = info.properties[b'DvNm'].decode("utf-8") if b'DvNm' in info.properties else name.replace("._touch-able._tcp.local.", "")
             record = ClientRemotePairingRecord(name, info.port, pairing_guid, addresses, pretty_name)
-            self.app[mdns_entries][name] = record
-        else:
-            print("  No info")
+            self.app[remote_pairing_mdns_entries][name] = record
+        elif service_type == "_dacp._tcp.local.":
+            pretty_name = name.replace("._dacp._tcp.local.", "")
+            record = ClientRemoteControlRecord(name, info.port, addresses, pretty_name)
+            self.app[remote_control_mdns_entries][name] = record
+            print(record)
+
         print('\n')
 
 async def mdns_task(app):
@@ -162,7 +187,7 @@ class ArrowServerProtocol(asyncio.Protocol):
         start_bytes = data[0:4]
         using_session = None
         for session_id, _session in app[session].items():
-            print(_session['trackpad_expected_start_bytes'], start_bytes)
+            print(f"start_bytes for {session_id}", _session['trackpad_expected_start_bytes'], start_bytes)
             if start_bytes == _session['trackpad_expected_start_bytes']:
                 print(f"using session {_session}")
                 using_session = _session
@@ -199,9 +224,8 @@ async def directonal_controller_task(app):
     app[arrow_manager].cancel()
     await server.close()
 
-
 async def get_pairable_remotes(request):
-    return web.Response(body=str(app[mdns_entries]), status=200)
+    return web.Response(body=str(app[remote_pairing_mdns_entries]), status=200)
 
 async def pair_to_remote(request):
     def get_pairing_code(pin_code, pairing_guid):
@@ -220,9 +244,9 @@ async def pair_to_remote(request):
     if 'pin' not in query:
         return web.Response(body="Must include ?pin=", status=400)
     pin_code = query['pin']
-    if fqn not in app[mdns_entries]:
+    if fqn not in app[remote_pairing_mdns_entries]:
         return web.Response(body="remote not found", status=404)
-    record = app[mdns_entries][fqn]
+    record = app[remote_pairing_mdns_entries][fqn]
     pairing_code = get_pairing_code(pin_code, record.pairing_guid)
     logging.info(f"Attempting to pair to {query['fqn']} with pin {pin_code} and pairing guid {record.pairing_guid} -> {pairing_code=}")
     url = URL("http://127.0.0.1") / "pair" % {'pairingcode': pairing_code, 'servicename': DAAP_SERVER_ID}
@@ -252,7 +276,6 @@ async def pair_to_remote(request):
                 return web.Response(body=hex(guid_resp)[2:].upper(), status=200)
             except:
                 return web.Response(body="Failed to pair", status=500)
-
 
 async def get_server_info(request):
     print(request.url)
@@ -485,7 +508,7 @@ async def control_prompt_update(request):
             3131D7788B598BD1EFC7C1703A40A06C905C762CE1665440912A1BCA88F766861C436543A1A9AB536DEB479BF280\
             3F383E92A75B7360B47B8197387A6BB4EB82554C6762C06C4E236A890139396F56138C1B69395FCFED8CB74BF94D\
             91E0E98F6F8276A2B49172847498A5843847ED00FC8""" # magic number?
-            if prompt_id_0 else str(35001 ^ int(current_session["cmte"].split(",")[0])))
+            if prompt_id_0 else str(ARROWS_PORT ^ int(current_session["cmte"].split(",")[0])))
         ) +
                 tags.container_tag('mdcl', 
             tags.string_tag('cmce', 'kKeybMsgKey_TextInputType') +
@@ -532,6 +555,26 @@ async def get_playqueue_contents(request):
         "Server": "Darwin",
     })
 
+async def make_request_to_uxplay_client(current_session, command):
+    # find client record
+    current_record: Optional[ClientRemoteControlRecord] = None
+    for name, record in app[remote_control_mdns_entries].items():
+        print(record, UXPLAY_CLIENT_DACP_ID)
+        if UXPLAY_CLIENT_DACP_ID in record.fqn:
+            current_record = record
+    if current_record is None:
+        print("could not find dacp client")
+    print("Using record", current_record)
+    url = URL("http://127.0.0.1") / "ctrl-int" / "1" / command
+    url = url.with_port(current_record.port).with_host(record.addresses[0][0])
+    print(url)
+    async with ClientSession() as session:
+        async with session.get(url, headers={
+            "Active-Remote": UXPLAY_CLIENT_ACTIVE_REMOTE
+        }) as resp:
+            print(resp)
+
+
 async def control_prompt_entry(request):
     query = request.url.query
     if 'session-id' not in query:
@@ -558,6 +601,8 @@ async def control_prompt_entry(request):
         current_session["trackpad_expected_start_bytes"] = (32 ^ current_session["trackpad_key"]).to_bytes(4)
         print(current_session)
         print(f"DRPortInfoRequest cmte {cmte_resp}")
+    elif cmbe_resp == "playpause": # only one we will deal with for now
+        await make_request_to_uxplay_client(current_session, command=cmbe_resp)
 
     return web.Response(body=tags.container_tag('ceQE', tags.uint32_tag('mstt', 200)), status=204, headers={
         "Content-Type": "application/x-dmap-tagged",
@@ -570,7 +615,10 @@ if __name__ == '__main__':
     
     app = web.Application()
     mdns_manager = web.AppKey('mdns_manager', asyncio.Task[None])
-    mdns_entries = web.AppKey('mdns_entries', dict[str, ClientRemotePairingRecord])
+    remote_pairing_mdns_entries = web.AppKey('remote_pairing_mdns_entries', dict[str, ClientRemotePairingRecord])
+    remote_control_mdns_entries = web.AppKey('remote_control_entries', dict[str, ClientRemoteControlRecord])
+    
+
     creds = web.AppKey('creds', dict)
     session = web.AppKey('session', dict)
     arrow_manager = web.AppKey('arrow_manager', asyncio.Task[None])
