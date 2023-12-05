@@ -37,6 +37,22 @@ SUB_TEXT = 1471545639  # int.from_bytes(random.randbytes(4)) # used as an encryp
 DAAP_DATABASE_ID = "DDEA93B661D72B89" # binascii.hexlify(random.randbytes(8)).decode("utf-8").upper() gen these once?
 DAAP_SERVER_ID = "793C37358B18AEF8"   #        ^ ^ ^
 
+CMBE_COMMAND_TO_DACP_COMMAND = {
+    "playpause": "playpause",
+    "menu": None,
+    "topmenu": "stop",
+    "select": None,
+}
+
+ARROWS_TO_DACP_COMMAND = {
+    "left": "previtem",
+    "right": "nextitem",
+    "down": "volumedown",
+    "up": "volumeup",
+}
+
+# // todo: error handling
+
 
 @dataclass
 class ClientRemotePairingRecord:
@@ -198,12 +214,20 @@ class ArrowServerProtocol(asyncio.Protocol):
         decrypted_message = [using_session['trackpad_key'] ^ int.from_bytes(int(x,16).to_bytes(4, 'big')) for x in wrap(message.decode("utf-8"),8)]
         print("Decrypted Message: ", decrypted_message)
         if decrypted_message[7] == 10486038:
+            if "down" in ARROWS_TO_DACP_COMMAND and ARROWS_TO_DACP_COMMAND["down"] is not None:
+                asyncio.ensure_future(make_request_to_uxplay_client(using_session, command=ARROWS_TO_DACP_COMMAND["down"]), loop=self.app.loop)
             print("ARROW DOWN")
         elif decrypted_message[7] == 10485938:
+            if "up" in ARROWS_TO_DACP_COMMAND and ARROWS_TO_DACP_COMMAND["up"] is not None:
+                asyncio.ensure_future(make_request_to_uxplay_client(using_session, command=ARROWS_TO_DACP_COMMAND["up"]), loop=self.app.loop)
             print("ARROW UP")
         elif decrypted_message[7] == 7209188:
+            if "left" in ARROWS_TO_DACP_COMMAND and ARROWS_TO_DACP_COMMAND["left"] is not None:
+                asyncio.ensure_future(make_request_to_uxplay_client(using_session, command=ARROWS_TO_DACP_COMMAND["left"]), loop=self.app.loop)
             print("ARROW LEFT")
         elif decrypted_message[7] == 13762788:
+            if "right" in ARROWS_TO_DACP_COMMAND and ARROWS_TO_DACP_COMMAND["right"] is not None:
+                asyncio.ensure_future(make_request_to_uxplay_client(using_session, command=ARROWS_TO_DACP_COMMAND["right"]), loop=self.app.loop)
             print("ARROW RIGHT")
 
 
@@ -213,7 +237,7 @@ class ArrowServerProtocol(asyncio.Protocol):
 
 async def directonal_controller_task(app):
     server = await app.loop.create_server(
-        lambda: ArrowServerProtocol(0),
+        lambda: ArrowServerProtocol(app),
         ADDRESS, ARROWS_PORT)
     # server.sockets[0].setsockopt(SOL_SOCKET, SO_KEEPALIVE, 1)
     app[arrow_manager] = asyncio.create_task(server.serve_forever())
@@ -564,6 +588,7 @@ async def make_request_to_uxplay_client(current_session, command):
             current_record = record
     if current_record is None:
         print("could not find dacp client")
+        return
     print("Using record", current_record)
     url = URL("http://127.0.0.1") / "ctrl-int" / "1" / command
     url = url.with_port(current_record.port).with_host(record.addresses[0][0])
@@ -601,8 +626,9 @@ async def control_prompt_entry(request):
         current_session["trackpad_expected_start_bytes"] = (32 ^ current_session["trackpad_key"]).to_bytes(4)
         print(current_session)
         print(f"DRPortInfoRequest cmte {cmte_resp}")
-    elif cmbe_resp == "playpause": # only one we will deal with for now
-        await make_request_to_uxplay_client(current_session, command=cmbe_resp)
+    elif cmbe_resp in CMBE_COMMAND_TO_DACP_COMMAND and CMBE_COMMAND_TO_DACP_COMMAND[cmbe_resp] is not None:
+        await make_request_to_uxplay_client(current_session, command=CMBE_COMMAND_TO_DACP_COMMAND[cmbe_resp])
+        
 
     return web.Response(body=tags.container_tag('ceQE', tags.uint32_tag('mstt', 200)), status=204, headers={
         "Content-Type": "application/x-dmap-tagged",
