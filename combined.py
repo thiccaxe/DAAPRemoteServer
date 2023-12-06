@@ -630,7 +630,11 @@ async def make_request_to_uxplay_client(current_session, command, retry=True):
             "Active-Remote": uxplay_data["active_remote"]
         }) as resp:
             print(resp)
-
+            if (resp.status != 200) and (retry is True):
+                # some issue with credentials, reload
+                print("reloading uxplay file! (for bad credentials?)")
+                await update_uxplay_dacp_data()
+                await make_request_to_uxplay_client(current_session, command, retry=False)
 
 async def control_prompt_entry(request):
     query = request.url.query
