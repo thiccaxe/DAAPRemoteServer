@@ -12,6 +12,7 @@ from zeroconf.asyncio import (
     AsyncZeroconf,
     AsyncZeroconfServiceTypes,
 )
+import aiofiles
 from json import loads, dumps
 from io import StringIO
 from hashlib import md5
@@ -29,9 +30,10 @@ SERVER_ADDRESSES = [inet_aton(ADDRESS),]
 SERVER_PORT = 33689
 ARROWS_PORT = 34999
 
-UXPLAY_CLIENT_ACTIVE_REMOTE = "0123456789"
-UXPLAY_CLIENT_DACP_ID = "DACP_ID"
-UXPLAY_CLIENT_IP_ADDR = "192.168...." # not needed i guess?
+UXPLAY_DACP_FILE = "./.uxplay.dacp"
+# format:
+# line 1: dacp_id (hex, uppercase)
+# line 2: active remote (integer)
 
 SUB_TEXT = 1471545639  # int.from_bytes(random.randbytes(4)) # used as an encryption key. // todo: set this per-session??? or should be constant?
 DAAP_DATABASE_ID = "DDEA93B661D72B89" # binascii.hexlify(random.randbytes(8)).decode("utf-8").upper() gen these once?
@@ -579,15 +581,45 @@ async def get_playqueue_contents(request):
         "Server": "Darwin",
     })
 
-async def make_request_to_uxplay_client(current_session, command):
-    # find client record
+async def update_uxplay_dacp_data():
+    try:
+        async with aiofiles.open("./.uxplay.dacp", "r") as file:
+            lines = await file.readlines()
+            lines = [line.strip() for line in lines]
+            if len(lines) != 2:
+                raise Exception("uxplay dacp had bad data!")
+            uxplay_data = {
+                'dacp_id': lines[0],
+                'active_remote': lines[1],
+            }
+            app[uxplay] = uxplay_data
+
+            
+    except Exception as e:
+        app[uxplay] = None
+        print("Error in reading uxplay file: ", e)
+async def make_request_to_uxplay_client(current_session, command, retry=True):
+    # find client record]
+    uxplay_data = app[uxplay]
+    if (uxplay_data is None):
+        if (retry is True):
+            print("no data for dacp client, loading file!")
+            await update_uxplay_dacp_data()
+            await make_request_to_uxplay_client(current_session, command, retry=False)
+        else:
+            print("could not get dacp client data!")
+        return
     current_record: Optional[ClientRemoteControlRecord] = None
     for name, record in app[remote_control_mdns_entries].items():
-        print(record, UXPLAY_CLIENT_DACP_ID)
-        if UXPLAY_CLIENT_DACP_ID in record.fqn:
+        print(record, uxplay_data["dacp_id"])
+        if uxplay_data["dacp_id"] in record.fqn:
             current_record = record
     if current_record is None:
         print("could not find dacp client")
+        if retry is True:
+            print("reloading uxplay file!")
+            await update_uxplay_dacp_data()
+            await make_request_to_uxplay_client(current_session, command, retry=False)
         return
     print("Using record", current_record)
     url = URL("http://127.0.0.1") / "ctrl-int" / "1" / command
@@ -595,7 +627,7 @@ async def make_request_to_uxplay_client(current_session, command):
     print(url)
     async with ClientSession() as session:
         async with session.get(url, headers={
-            "Active-Remote": UXPLAY_CLIENT_ACTIVE_REMOTE
+            "Active-Remote": uxplay_data["active_remote"]
         }) as resp:
             print(resp)
 
@@ -648,9 +680,15 @@ if __name__ == '__main__':
     creds = web.AppKey('creds', dict)
     session = web.AppKey('session', dict)
     arrow_manager = web.AppKey('arrow_manager', asyncio.Task[None])
+    uxplay = web.AppKey('uxplay', dict)
 
     app[creds] = {}
     app[session] = {}
+    # app[uxplay] = {
+    #     "active_remote": None,
+    #     "dacp_id": None,
+    # }
+    app[uxplay] = None
     app.cleanup_ctx.append(mdns_task)
     app.cleanup_ctx.append(directonal_controller_task)
     app.add_routes([
