@@ -96,7 +96,7 @@ class AsyncRunner:
                 "atCV": "65539",   # some sort of prime number for crypto?
                 "Ver": "100000",   # version
             },
-            server=f"{SERVER_NAME}.local."
+            server=f"{SERVER_NAME.replace(' ', '-')}.local."
         )
 
         self.services = ["_touch-remote._tcp.local.", "_dacp._tcp.local."]
